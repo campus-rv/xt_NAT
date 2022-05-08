@@ -34,6 +34,7 @@ static atomic64_t sessions_active = ATOMIC_INIT(0);
 static atomic64_t users_active = ATOMIC_INIT(0);
 static atomic64_t sessions_tried = ATOMIC_INIT(0);
 static atomic64_t sessions_created = ATOMIC_INIT(0);
+static atomic64_t sessions_removed = ATOMIC_INIT(0);
 static atomic64_t dnat_dropped = ATOMIC_INIT(0);
 static atomic64_t frags = ATOMIC_INIT(0);
 static atomic64_t related_icmp = ATOMIC_INIT(0);
@@ -93,6 +94,7 @@ struct nat_htable_ent
 
 struct nat_session
 {
+  atomic_t ref;
   uint32_t in_addr;
   uint16_t in_port;
   uint16_t out_port;
@@ -244,13 +246,30 @@ void users_htable_remove(void)
   return;
 }
 
+static void free_session_callback(struct rcu_head *rcu)
+{
+  struct nat_htable_ent *session = container_of(rcu, struct nat_htable_ent, rcu);
+  struct nat_session *data = session->data;
+  if (atomic_dec_and_test(&data->ref))
+  {
+#ifdef DEBUG_SESSIONS
+    printk(KERN_INFO "xt_NAT removing data session %p\n", data);
+#endif
+    kfree(data);
+  }
+#ifdef DEBUG_SESSIONS
+  else
+    printk(KERN_INFO "xt_NAT session %p ref count is %d\n", data, (int) atomic_read(&data->ref));
+#endif
+ kfree(session);
+}
+
 void nat_htable_remove(void)
 {
   struct nat_htable_ent *session;
   struct hlist_head *head;
   struct hlist_node *next;
   unsigned int i;
-  void *p;
 
   for (i = 0; i < nat_hash_size; i++)
   {
@@ -274,6 +293,7 @@ void nat_htable_remove(void)
     head = &ht_outer[i].session;
     hlist_for_each_entry_safe(session, next, head, list_node)
     {
+      void *p;
       hlist_del_rcu(&session->list_node);
       ht_outer[i].use--;
       p = session->data;
@@ -365,13 +385,13 @@ static int check_user_limits(const uint8_t proto, const uint32_t addr)
 {
   struct user_htable_ent *user;
   struct hlist_head *head;
-  unsigned int hash, is_found, ret;
+  uint32_t hash;
+  int is_found = 0, ret;
   unsigned int sessions, session_limit;
 
   hash = get_hash_user_ent(addr);
   rcu_read_lock_bh();
   head = &ht_users[hash].user;
-  is_found = 0;
   hlist_for_each_entry_rcu(user, head, list_node)
   {
     if (user->addr == addr && user->idle < 15)
@@ -420,7 +440,8 @@ void update_user_limits(const uint8_t proto, const uint32_t addr, const int8_t o
 {
   struct user_htable_ent *user;
   struct hlist_head *head;
-  unsigned int hash, is_found;
+  uint32_t hash;
+  int is_found = 0;
   unsigned int sz;
   // uint32_t nataddr;
 
@@ -633,8 +654,9 @@ static void netflow_export_flow_v5(const uint8_t proto, const uint32_t useraddr,
 
 struct nat_htable_ent *create_nat_session(const uint8_t proto, const uint32_t useraddr, const uint16_t userport, const uint32_t nataddr)
 {
-  unsigned int hash;
-  struct nat_htable_ent *session, *session2;
+  uint32_t hash;
+  struct nat_htable_ent *session, *old_session;
+  struct nat_htable_ent *session2, *old_session2;
   struct nat_session *data_session;
   uint16_t natport;
   unsigned int sz;
@@ -648,18 +670,53 @@ struct nat_htable_ent *create_nat_session(const uint8_t proto, const uint32_t us
     return NULL;
   }
 
+  sz = sizeof(struct nat_session);
+  data_session = kzalloc(sz, GFP_ATOMIC);
+
+  if (unlikely(data_session == NULL))
+  {
+    printk(KERN_WARNING "xt_NAT create_nat_session ERROR: Cannot allocate memory for data_session\n");
+    return NULL;
+  }
+
+  sz = sizeof(struct nat_htable_ent);
+  session = kzalloc(sz, GFP_ATOMIC);
+
+  if (unlikely(session == NULL))
+  {
+    printk(KERN_WARNING "xt_NAT ERROR: Cannot allocate memory for ht_inner session\n");
+    kfree(data_session);
+    return NULL;
+  }
+
+  sz = sizeof(struct nat_htable_ent);
+  session2 = kzalloc(sz, GFP_ATOMIC);
+
+  if (unlikely(session2 == NULL))
+  {
+    printk(KERN_WARNING "xt_NAT ERROR: Cannot allocate memory for ht_outer session\n");
+    kfree(data_session);
+    kfree(session);
+    return NULL;
+  }
+
   nataddr_id = ntohl(nataddr) - ntohl(nat_pool_start);
   // printk(KERN_DEBUG "xt_NAT create_nat_session: nataddr_id = %u (%u - %u)\n",
   //   nataddr_id, ntohl(nataddr), ntohl(nat_pool_start));
   spin_lock_bh(&create_session_lock[nataddr_id]);
 
   rcu_read_lock_bh();
-  session = lookup_session(ht_inner, proto, useraddr, userport);
-  if (unlikely(session))
+  old_session = lookup_session(ht_inner, proto, useraddr, userport);
+  if (unlikely(old_session))
   {
-    printk(KERN_ERR "xt_NAT create_nat_session WARN: Race Condition found\n");
+    printk(KERN_WARNING "xt_NAT create_nat_session WARN: Race Condition found\n");
+    old_session2 = lookup_session(ht_outer, proto, nataddr, old_session->data->out_port);
+    rcu_read_unlock_bh();
     spin_unlock_bh(&create_session_lock[nataddr_id]);
-    return lookup_session(ht_outer, proto, nataddr, session->data->out_port);
+    kfree(data_session);
+    kfree(session);
+    kfree(session2);
+    return old_session2;
   }
   rcu_read_unlock_bh();
 
@@ -674,45 +731,16 @@ struct nat_htable_ent *create_nat_session(const uint8_t proto, const uint32_t us
                           "port for %d %pI4:%u -> %pI4:XXXX\n",
           proto, &useraddr, userport, &nataddr);
       spin_unlock_bh(&create_session_lock[nataddr_id]);
+      kfree(data_session);
+      kfree(session);
+      kfree(session2);
       return NULL;
     }
   }
   else
     natport = userport;
 
-  sz = sizeof(struct nat_session);
-  data_session = kzalloc(sz, GFP_ATOMIC);
-
-  if (unlikely(data_session == NULL))
-  {
-    printk(KERN_WARNING "xt_NAT create_nat_session ERROR: Cannot allocate memory for data_session\n");
-    spin_unlock_bh(&create_session_lock[nataddr_id]);
-    return NULL;
-  }
-
-  sz = sizeof(struct nat_htable_ent);
-  session = kzalloc(sz, GFP_ATOMIC);
-
-  if (unlikely(session == NULL))
-  {
-    printk(KERN_WARNING "xt_NAT ERROR: Cannot allocate memory for ht_inner session\n");
-    kfree(data_session);
-    spin_unlock_bh(&create_session_lock[nataddr_id]);
-    return NULL;
-  }
-
-  sz = sizeof(struct nat_htable_ent);
-  session2 = kzalloc(sz, GFP_ATOMIC);
-
-  if (unlikely(session2 == NULL))
-  {
-    printk(KERN_WARNING "xt_NAT ERROR: Cannot allocate memory for ht_outer session\n");
-    kfree(data_session);
-    kfree(session);
-    spin_unlock_bh(&create_session_lock[nataddr_id]);
-    return NULL;
-  }
-
+  atomic_set(&data_session->ref, 2);
   data_session->in_addr = useraddr;
   data_session->in_port = userport;
   data_session->out_port = natport;
@@ -1500,7 +1528,6 @@ void sessions_cleanup_timer_callback(struct timer_list *timer)
   struct hlist_head *head;
   struct hlist_node *next;
   unsigned int i;
-  void *p;
   uint32_t vector_start, vector_end;
 
   spin_lock_bh(&sessions_timer_lock);
@@ -1542,8 +1569,8 @@ void sessions_cleanup_timer_callback(struct timer_list *timer)
         {
           hlist_del_rcu(&session->list_node);
           ht_inner[i].use--;
-          kfree_rcu(session, rcu);
           update_user_limits(session->proto, session->addr, -1);
+          call_rcu(&session->rcu, free_session_callback);
         }
       }
     }
@@ -1562,10 +1589,9 @@ void sessions_cleanup_timer_callback(struct timer_list *timer)
         {
           hlist_del_rcu(&session->list_node);
           ht_outer[i].use--;
-          p = session->data;
-          kfree_rcu(session, rcu);
-          kfree(p);
+          call_rcu(&session->rcu, free_session_callback);
           atomic64_dec(&sessions_active);
+          atomic64_inc(&sessions_removed);
         }
       }
     }
@@ -1688,6 +1714,7 @@ static int stat_seq_show(struct seq_file *m, void *v)
   seq_printf(m, "Active NAT sessions: %lld\n", atomic64_read(&sessions_active));
   seq_printf(m, "Tried NAT sessions: %lld\n", atomic64_read(&sessions_tried));
   seq_printf(m, "Created NAT sessions: %lld\n", atomic64_read(&sessions_created));
+  seq_printf(m, "Removed NAT sessions: %lld\n", atomic64_read(&sessions_removed));
   seq_printf(m, "DNAT dropped pkts: %lld\n", atomic64_read(&dnat_dropped));
   seq_printf(m, "Fragmented pkts: %lld\n", atomic64_read(&frags));
   seq_printf(m, "Related ICMP pkts: %lld\n", atomic64_read(&related_icmp));
