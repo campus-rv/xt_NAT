@@ -1807,7 +1807,7 @@ static int __init nat_tg_init(void)
     buff[j] = nat_pool[i];
   nat_pool_end = in_aton(buff);
 
-  if (nat_pool_start && nat_pool_end && nat_pool_start <= nat_pool_end)
+  if (nat_pool_start && nat_pool_end && ntohl(nat_pool_start) <= ntohl(nat_pool_end))
   {
     printk(KERN_INFO "xt_NAT DEBUG: IP Pool from %pI4 to %pI4\n", &nat_pool_start, &nat_pool_end);
     pool_table_create();
