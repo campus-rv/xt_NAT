@@ -13,6 +13,7 @@
 #include <linux/timer.h>
 #include <linux/udp.h>
 #include <linux/vmalloc.h>
+#include <linux/random.h>
 #include <net/tcp.h>
 
 #define FLAG_REPLIED (1 << 0) /* 000001 */
@@ -39,23 +40,32 @@ static atomic64_t dnat_dropped = ATOMIC_INIT(0);
 static atomic64_t frags = ATOMIC_INIT(0);
 static atomic64_t related_icmp = ATOMIC_INIT(0);
 
-static char nat_pool_buf[128] = "127.0.0.1-127.0.0.1";
-static char *nat_pool = nat_pool_buf;
-module_param(nat_pool, charp, 0444);
-MODULE_PARM_DESC(nat_pool, "NAT pool range (addr_start-addr_end), default = 127.0.0.1-127.0.0.1");
+static char param_nat_pool_buf[128] = "127.0.0.1";
+static char *param_nat_pool = param_nat_pool_buf;
+module_param_named(nat_pool, param_nat_pool, charp, 0444);
+MODULE_PARM_DESC(param_nat_pool, "NAT address range (addr_start[-addr_end]), default: 127.0.0.1");
+
+static char param_port_range_buf[128] = "1024-65535";
+static char *param_port_range = param_port_range_buf;
+module_param_named(ports, param_port_range, charp, 0444);
+MODULE_PARM_DESC(param_port_range, "NAT port range (start_port-end_port), default: 1024-65535");
 
 static int nat_hash_size = 256 * 1024;
 module_param(nat_hash_size, int, 0444);
-MODULE_PARM_DESC(nat_hash_size, "nat hash size, default = 256k");
+MODULE_PARM_DESC(nat_hash_size, "nat hash size, default: 256k");
+
+static bool use_random_port = false;
+module_param_named(random_port, use_random_port, bool, 0444);
+MODULE_PARM_DESC(use_random_port, "randomize NAT port, default: off");
 
 static int users_hash_size = 4096;
 module_param(users_hash_size, int, 0444);
-MODULE_PARM_DESC(users_hash_size, "users hash size, default = 4k");
+MODULE_PARM_DESC(users_hash_size, "users hash size, default: 4k");
 
 static char nf_dest_buf[128] = "";
 static char *nf_dest = nf_dest_buf;
 module_param(nf_dest, charp, 0444);
-MODULE_PARM_DESC(nf_dest, "Netflow v5 collectors (addr1:port1[,addr2:port2]), default = none");
+MODULE_PARM_DESC(nf_dest, "Netflow v5 collectors (addr1:port1[,addr2:port2]), default: none");
 
 uint32_t nat_htable_vector = 0;
 uint32_t users_htable_vector = 0;
@@ -124,6 +134,9 @@ struct xt_users_htable *ht_users;
 
 static uint32_t nat_pool_start;
 static uint32_t nat_pool_end;
+
+static int nat_port_start;
+static int nat_port_end;
 
 struct xt_nat_htable *ht_inner, *ht_outer;
 
@@ -363,20 +376,33 @@ struct nat_htable_ent *lookup_session(struct xt_nat_htable *ht, const uint8_t pr
   return NULL;
 }
 
-static uint16_t search_free_l4_port(const uint8_t proto, const uint32_t nataddr, const uint16_t userport)
+static uint16_t get_random_port(void)
 {
-  uint16_t i, freeport;
-  for (i = 0; i < 64512; i++)
+  uint32_t val;
+  get_random_bytes(&val, sizeof(val));
+  return val % (nat_port_end - nat_port_start + 1) + nat_port_start;
+}
+
+static uint16_t search_free_l4_port(uint8_t proto, uint32_t nataddr, uint16_t user_port)
+{
+  int ports = nat_port_end - nat_port_start + 1;
+  int port;
+  if (use_random_port)
+    port = get_random_port();
+  else
   {
-    freeport = ntohs(userport) + i;
-
-    if (freeport < 1024)
-      freeport += 1024;
-
-    // printk(KERN_DEBUG "xt_NAT search_free_l4_port: check nat port = %d\n", freeport);
-
-    if (!lookup_session(ht_outer, proto, nataddr, htons(freeport)))
-      return htons(freeport);
+    port = ntohs(user_port);
+    if (port < nat_port_start)
+      port += nat_port_start;
+    if (port > nat_port_end)
+      port = get_random_port();
+  }
+  while (ports)
+  {
+    if (!lookup_session(ht_outer, proto, nataddr, htons((uint16_t) port)))
+      return htons((uint16_t) port);
+    if (++port > nat_port_end) port = nat_port_start;
+    ports--;
   }
   return 0;
 }
@@ -1794,18 +1820,19 @@ static struct xt_target nat_tg_reg __read_mostly =
 
 static int __init nat_tg_init(void)
 {
-  char buff[128] = {0};
-  int i, j;
-
+  char *p;
   printk(KERN_INFO "Module xt_NAT loaded\n");
 
-  for (i = 0, j = 0; i < 128 && nat_pool[i] != '-' && nat_pool[i] != '\0'; i++, j++)
-    buff[j] = nat_pool[i];
-  nat_pool_start = in_aton(buff);
-
-  for (i++, j = 0; i < 128 && nat_pool[i] != '-' && nat_pool[i] != '\0'; i++, j++)
-    buff[j] = nat_pool[i];
-  nat_pool_end = in_aton(buff);
+  p = strnchr(param_nat_pool, sizeof(param_nat_pool_buf), '-');
+  if (p)
+  {
+    *p = 0;
+    nat_pool_start = in_aton(param_nat_pool);
+    nat_pool_end = in_aton(p + 1);
+    *p = '-';
+  }
+  else
+    nat_pool_start = nat_pool_end = in_aton(param_nat_pool);
 
   if (nat_pool_start && nat_pool_end && ntohl(nat_pool_start) <= ntohl(nat_pool_end))
   {
@@ -1814,7 +1841,28 @@ static int __init nat_tg_init(void)
   }
   else
   {
-    printk(KERN_INFO "xt_NAT DEBUG: BAD IP Pool from %pI4 to %pI4\n", &nat_pool_start, &nat_pool_end);
+    printk(KERN_INFO "xt_NAT: Bad IP pool from %pI4 to %pI4\n", &nat_pool_start, &nat_pool_end);
+    return -1;
+  }
+
+  p = strnchr(param_port_range, sizeof(param_port_range_buf), '-');
+  if (p)
+  {
+    *p = 0;
+    nat_port_start = simple_strtoul(param_port_range, NULL, 0);
+    nat_port_end = simple_strtoul(p  + 1, NULL, 0);
+    *p = '-';
+  }
+  if (nat_port_start < 1024 || nat_port_start > 65535 ||
+      nat_port_end < 1024 || nat_port_end > 65535 ||
+      nat_port_start > nat_port_end)
+  {
+    printk(KERN_INFO "xt_NAT: Bad port range\n");
+    return -1;
+  }
+  if (nat_port_end - nat_port_start < 1024)
+  {
+    printk(KERN_INFO "xt_NAT: Port range too small (%d - %d)\n", nat_port_start, nat_port_end);
     return -1;
   }
 
