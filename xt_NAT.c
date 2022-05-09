@@ -537,7 +537,7 @@ void update_user_limits(const uint8_t proto, const uint32_t addr, const int8_t o
 }
 
 /* socket code */
-static void sk_error_report(struct sock *sk)
+static void error_report(struct sock *sk)
 {
   /* clear connection refused errors if any */
   sk->sk_err = 0;
@@ -554,9 +554,9 @@ static struct socket *usock_open_sock(const struct sockaddr_storage *addr, void 
     return NULL;
   }
   sock->sk->sk_allocation = GFP_ATOMIC;
-  sock->sk->sk_prot->unhash(sock->sk);          /* hidden from input */
-  sock->sk->sk_error_report = &sk_error_report; /* clear ECONNREFUSED */
-  sock->sk->sk_user_data = user_data;           /* usock */
+  sock->sk->sk_prot->unhash(sock->sk); /* hidden from input */
+  sock->sk->sk_error_report = error_report; /* clear ECONNREFUSED */
+  sock->sk->sk_user_data = user_data; /* usock */
 
   if (sndbuf < SOCK_MIN_SNDBUF)
     sndbuf = SOCK_MIN_SNDBUF;
@@ -1133,11 +1133,13 @@ static unsigned int nat_tg(struct sk_buff *skb, const struct xt_action_param *pa
 
       if (unlikely(skb_shinfo(skb)->nr_frags > 1 && skb_headlen(skb) == sizeof(struct iphdr)))
       {
+        unsigned frag_size;
         frag = &skb_shinfo(skb)->frags[0];
-        // printk(KERN_DEBUG "xt_NAT DNAT: frag_size = %d (required %lu)\n", frag->size, sizeof(struct tcphdr));
-        if (unlikely(frag->size < sizeof(struct tcphdr)))
+        frag_size = skb_frag_size(frag);
+        // printk(KERN_DEBUG "xt_NAT DNAT: frag_size = %d (required %lu)\n", frag_size, sizeof(struct tcphdr));
+        if (unlikely(frag_size < sizeof(struct tcphdr)))
         {
-          printk(KERN_DEBUG "xt_NAT DNAT: drop TCP frag_size = %d\n", frag->size);
+          printk(KERN_DEBUG "xt_NAT DNAT: drop TCP frag_size = %d\n", frag_size);
           return NF_DROP;
         }
         tcp = (struct tcphdr *) skb_frag_address_safe(frag);
@@ -1207,11 +1209,13 @@ static unsigned int nat_tg(struct sk_buff *skb, const struct xt_action_param *pa
 
       if (unlikely(skb_shinfo(skb)->nr_frags > 1 && skb_headlen(skb) == sizeof(struct iphdr)))
       {
+        unsigned frag_size;
         frag = &skb_shinfo(skb)->frags[0];
-        // printk(KERN_DEBUG "xt_NAT DNAT: frag_size = %d (required %lu)\n", frag->size, sizeof(struct udphdr));
-        if (unlikely(frag->size < sizeof(struct udphdr)))
+        frag_size = skb_frag_size(frag);
+        // printk(KERN_DEBUG "xt_NAT DNAT: frag_size = %d (required %lu)\n", frag_size, sizeof(struct udphdr));
+        if (unlikely(frag_size < sizeof(struct udphdr)))
         {
-          printk(KERN_DEBUG "xt_NAT DNAT: drop UDP frag_size = %d\n", frag->size);
+          printk(KERN_DEBUG "xt_NAT DNAT: drop UDP frag_size = %d\n", frag_size);
           return NF_DROP;
         }
         udp = (struct udphdr *) skb_frag_address_safe(frag);
@@ -1679,13 +1683,23 @@ static int nat_seq_open(struct inode *inode, struct file *file)
   return single_open(file, nat_seq_show, NULL);
 }
 
-static const struct file_operations nat_seq_fops =
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+static const struct proc_ops nat_seq_ops =
+{
+  .proc_open = nat_seq_open,
+  .proc_read = seq_read,
+  .proc_lseek = seq_lseek,
+  .proc_release = single_release,
+};
+#else
+static const struct file_operations nat_seq_ops =
 {
   .open = nat_seq_open,
   .read = seq_read,
   .llseek = seq_lseek,
   .release = single_release,
 };
+#endif
 
 static int users_seq_show(struct seq_file *m, void *v)
 {
@@ -1727,13 +1741,23 @@ static int users_seq_open(struct inode *inode, struct file *file)
   return single_open(file, users_seq_show, NULL);
 }
 
-static const struct file_operations users_seq_fops =
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+static const struct proc_ops users_seq_ops =
 {
-    .open = users_seq_open,
-    .read = seq_read,
-    .llseek = seq_lseek,
-    .release = single_release,
+  .proc_open = users_seq_open,
+  .proc_read = seq_read,
+  .proc_lseek = seq_lseek,
+  .proc_release = single_release,
 };
+#else
+static const struct file_operations users_seq_ops =
+{
+  .open = users_seq_open,
+  .read = seq_read,
+  .llseek = seq_lseek,
+  .release = single_release,
+};
+#endif
 
 static int stat_seq_show(struct seq_file *m, void *v)
 {
@@ -1751,13 +1775,23 @@ static int stat_seq_show(struct seq_file *m, void *v)
 
 static int stat_seq_open(struct inode *inode, struct file *file) { return single_open(file, stat_seq_show, NULL); }
 
-static const struct file_operations stat_seq_fops =
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+static const struct proc_ops stat_seq_ops =
 {
-    .open = stat_seq_open,
-    .read = seq_read,
-    .llseek = seq_lseek,
-    .release = single_release,
+  .proc_open = stat_seq_open,
+  .proc_read = seq_read,
+  .proc_lseek = seq_lseek,
+  .proc_release = single_release,
 };
+#else
+static const struct file_operations stat_seq_ops =
+{
+  .open = stat_seq_open,
+  .read = seq_read,
+  .llseek = seq_lseek,
+  .release = single_release,
+};
+#endif
 
 #define SEPARATORS " ,;\t\n"
 static int add_nf_destinations(const char *ptr)
@@ -1876,9 +1910,9 @@ static int __init nat_tg_init(void)
   add_nf_destinations(nf_dest);
 
   proc_net_nat = proc_mkdir("NAT", init_net.proc_net);
-  proc_create("sessions", 0644, proc_net_nat, &nat_seq_fops);
-  proc_create("users", 0644, proc_net_nat, &users_seq_fops);
-  proc_create("statistics", 0644, proc_net_nat, &stat_seq_fops);
+  proc_create("sessions", 0644, proc_net_nat, &nat_seq_ops);
+  proc_create("users", 0644, proc_net_nat, &users_seq_ops);
+  proc_create("statistics", 0644, proc_net_nat, &stat_seq_ops);
 
   spin_lock_bh(&sessions_timer_lock);
   timer_setup(&sessions_cleanup_timer, sessions_cleanup_timer_callback, 0);
