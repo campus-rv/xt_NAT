@@ -22,6 +22,10 @@
 #define TCP_SYN_ACK 0x12
 #define TCP_FIN_RST 0x05
 
+#define TIME_SESSIONS_CLEANUP 10
+#define TIME_USERS_CLEANUP    60
+#define TIME_SEND_NETFLOW     1
+
 static LIST_HEAD(usock_list);
 static int sndbuf = 1310720;
 static int engine_id = 0;
@@ -1916,18 +1920,21 @@ static int __init nat_tg_init(void)
 
   spin_lock_bh(&sessions_timer_lock);
   timer_setup(&sessions_cleanup_timer, sessions_cleanup_timer_callback, 0);
-  mod_timer(&sessions_cleanup_timer, jiffies + msecs_to_jiffies(10 * 1000));
+  mod_timer(&sessions_cleanup_timer, jiffies + msecs_to_jiffies(TIME_SESSIONS_CLEANUP * 1000));
   spin_unlock_bh(&sessions_timer_lock);
 
   spin_lock_bh(&users_timer_lock);
   timer_setup(&users_cleanup_timer, users_cleanup_timer_callback, 0);
-  mod_timer(&users_cleanup_timer, jiffies + msecs_to_jiffies(60 * 1000));
+  mod_timer(&users_cleanup_timer, jiffies + msecs_to_jiffies(TIME_USERS_CLEANUP * 1000));
   spin_unlock_bh(&users_timer_lock);
 
-  spin_lock_bh(&nfsend_lock);
-  timer_setup(&nf_send_timer, nf_send_timer_callback, 0);
-  mod_timer(&nf_send_timer, jiffies + msecs_to_jiffies(1000));
-  spin_unlock_bh(&nfsend_lock);
+  if (!list_empty(&usock_list))
+  {
+    spin_lock_bh(&nfsend_lock);
+    timer_setup(&nf_send_timer, nf_send_timer_callback, 0);
+    mod_timer(&nf_send_timer, jiffies + msecs_to_jiffies(TIME_SEND_NETFLOW * 1000));
+    spin_unlock_bh(&nfsend_lock);
+  }
 
   return xt_register_target(&nat_tg_reg);
 }
@@ -1941,7 +1948,8 @@ static void __exit nat_tg_exit(void)
   spin_lock_bh(&nfsend_lock);
   del_timer(&sessions_cleanup_timer);
   del_timer(&users_cleanup_timer);
-  del_timer(&nf_send_timer);
+  if (!list_empty(&usock_list))
+    del_timer(&nf_send_timer);
 
   remove_proc_entry("sessions", proc_net_nat);
   remove_proc_entry("users", proc_net_nat);
@@ -1954,13 +1962,10 @@ static void __exit nat_tg_exit(void)
 
   while (!list_empty(&usock_list))
   {
-    struct netflow_sock *usock;
-
-    usock = list_entry(usock_list.next, struct netflow_sock, list);
+    struct netflow_sock *usock = list_entry(usock_list.next, struct netflow_sock, list);
     list_del(&usock->list);
     if (usock->sock)
       sock_release(usock->sock);
-    usock->sock = NULL;
     vfree(usock);
   }
 
