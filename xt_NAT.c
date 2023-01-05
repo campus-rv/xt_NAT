@@ -826,6 +826,11 @@ static unsigned int nat_tg(struct sk_buff *skb, const struct xt_action_param *pa
   skb_frag_t *frag;
   const struct xt_nat_tginfo *info = par->targinfo;
 
+#ifdef FULL_CHECKSUM
+  if (skb_linearize(skb) < 0)
+    return NF_DROP;
+#endif
+
   if (unlikely(skb->protocol != htons(ETH_P_IP)))
   {
     printk(KERN_DEBUG "xt_NAT DEBUG: Drop not IP packet\n");
@@ -1161,13 +1166,26 @@ static unsigned int nat_tg(struct sk_buff *skb, const struct xt_action_param *pa
       session = lookup_session(ht_outer, ip->protocol, ip->daddr, tcp->dest);
       if (likely(session))
       {
+#ifdef FULL_CHECKSUM
+        unsigned tcplen;
+#endif
         // printk(KERN_DEBUG "xt_NAT DNAT: found session for src ip = %pI4 and src port = %d and nat port = %d\n",
         //   &session->data->in_addr, ntohs(session->data->in_port), ntohs(tcp->dest));
+#ifndef FULL_CHECKSUM
         csum_replace4(&ip->check, ip->daddr, session->data->in_addr);
         inet_proto_csum_replace4(&tcp->check, skb, ip->daddr, session->data->in_addr, true);
         inet_proto_csum_replace2(&tcp->check, skb, tcp->dest, session->data->in_port, true);
+#endif
         ip->daddr = session->data->in_addr;
         tcp->dest = session->data->in_port;
+#ifdef FULL_CHECKSUM
+        tcplen = skb->len - (ip->ihl << 2);
+        tcp->check = 0;
+        tcp->check = tcp_v4_check(tcplen, ip->saddr, ip->daddr, csum_partial((char *) tcp, tcplen, 0));
+        ip->check = 0;
+        ip->check = ip_fast_csum((u8 *) ip, ip->ihl);
+        skb->ip_summed = CHECKSUM_NONE;
+#endif
 
         if (tcp->fin || tcp->rst)
         {

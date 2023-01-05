@@ -3,7 +3,8 @@ KDIR   ?= /lib/modules/$(KVER)/build/
 DEPMOD  = /sbin/depmod -a
 CC     ?= gcc
 obj-m   = xt_NAT.o
-CFLAGS_xt_NAT.o := -DDEBUG
+CFLAGS_xt_NAT.o := -DFULL_CHECKSUM
+#-DDEBUG_SESSIONS
 
 all: xt_NAT.ko libxt_NAT.so
 
