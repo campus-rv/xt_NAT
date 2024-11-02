@@ -927,7 +927,7 @@ static unsigned int nat_tg(struct sk_buff *skb, const struct xt_action_param *pa
         session = create_nat_session(ip, tcp->source, tcp->dest, nat_addr);
         if (session == NULL)
         {
-          printk(KERN_NOTICE "xt_NAT SNAT: Cannot create new session. Dropping packet\n");
+          //printk(KERN_NOTICE "xt_NAT SNAT: Cannot create new session. Dropping packet\n");
           return NF_DROP;
         }
 
@@ -986,7 +986,7 @@ static unsigned int nat_tg(struct sk_buff *skb, const struct xt_action_param *pa
         session = create_nat_session(ip, udp->source, udp->dest, nat_addr);
         if (session == NULL)
         {
-          printk(KERN_NOTICE "xt_NAT SNAT: Cannot create new session. Dropping packet\n");
+          //printk(KERN_NOTICE "xt_NAT SNAT: Cannot create new session. Dropping packet\n");
           return NF_DROP;
         }
 
@@ -1057,7 +1057,7 @@ static unsigned int nat_tg(struct sk_buff *skb, const struct xt_action_param *pa
         session = create_nat_session(ip, nat_port, 0, nat_addr);
         if (session == NULL)
         {
-          printk(KERN_NOTICE "xt_NAT SNAT: Cannot create new session. Dropping packet\n");
+          //printk(KERN_NOTICE "xt_NAT SNAT: Cannot create new session. Dropping packet\n");
           return NF_DROP;
         }
 
@@ -1100,7 +1100,7 @@ static unsigned int nat_tg(struct sk_buff *skb, const struct xt_action_param *pa
         session = create_nat_session(ip, 0, 0, nat_addr);
         if (session == NULL)
         {
-          printk(KERN_NOTICE "xt_NAT SNAT: Cannot create new session. Dropping packet\n");
+          //printk(KERN_NOTICE "xt_NAT SNAT: Cannot create new session. Dropping packet\n");
           return NF_DROP;
         }
 
