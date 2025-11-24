@@ -210,7 +210,7 @@ static int pool_table_create(void)
   return 0;
 }
 
-void pool_table_remove(void)
+static void pool_table_remove(void)
 {
   kfree(create_session_lock);
   printk(KERN_INFO "xt_NAT pool_table_remove DEBUG: removed\n");
@@ -238,7 +238,7 @@ static int users_htable_create(void)
   return 0;
 }
 
-void users_htable_remove(void)
+static void users_htable_remove(void)
 {
   struct user_htable_ent *user;
   struct hlist_head *head;
@@ -283,7 +283,7 @@ static void free_session_callback(struct rcu_head *rcu)
  kfree(session);
 }
 
-void nat_htable_remove(void)
+static void nat_htable_remove(void)
 {
   struct nat_htable_ent *session;
   struct hlist_head *head;
@@ -361,7 +361,7 @@ static int nat_htable_create(void)
   return 0;
 }
 
-struct nat_htable_ent *lookup_session(struct xt_nat_htable *ht, const uint8_t proto, const uint32_t addr, const uint16_t port)
+static struct nat_htable_ent *lookup_session(struct xt_nat_htable *ht, const uint8_t proto, const u_int32_t addr, const uint16_t port)
 {
   struct nat_htable_ent *session;
   struct hlist_head *head;
@@ -468,7 +468,7 @@ static int check_user_limits(const uint8_t proto, const uint32_t addr)
   return ret;
 }
 
-void update_user_limits(const uint8_t proto, const uint32_t addr, const int8_t operation)
+static void update_user_limits(const u_int8_t proto, const u_int32_t addr, const int8_t operation)
 {
   struct user_htable_ent *user;
   struct hlist_head *head;
@@ -543,7 +543,7 @@ void update_user_limits(const uint8_t proto, const uint32_t addr, const int8_t o
 }
 
 /* socket code */
-static void error_report(struct sock *sk)
+static void nat_sk_error_report(struct sock *sk)
 {
   /* clear connection refused errors if any */
   sk->sk_err = 0;
@@ -554,15 +554,14 @@ static struct socket *usock_open_sock(const struct sockaddr_storage *addr, void 
   struct socket *sock;
   int error;
 
-  if ((error = sock_create_kern(addr->ss_family, SOCK_DGRAM, IPPROTO_UDP, &sock)) < 0)
-  {
-    printk(KERN_WARNING "xt_NAT NEL: sock_create_kern error %d\n", -error);
-    return NULL;
-  }
-  sock->sk->sk_allocation = GFP_ATOMIC;
-  sock->sk->sk_prot->unhash(sock->sk); /* hidden from input */
-  sock->sk->sk_error_report = error_report; /* clear ECONNREFUSED */
-  sock->sk->sk_user_data = user_data; /* usock */
+    if ((error = sock_create_kern(addr->ss_family, SOCK_DGRAM, IPPROTO_UDP, &sock)) < 0) {
+        printk(KERN_WARNING "xt_NAT NEL: sock_create_kern error %d\n", -error);
+        return NULL;
+    }
+    sock->sk->sk_allocation = GFP_ATOMIC;
+    sock->sk->sk_prot->unhash(sock->sk); /* hidden from input */
+    sock->sk->sk_error_report = &nat_sk_error_report; /* clear ECONNREFUSED */
+    sock->sk->sk_user_data = user_data; /* usock */
 
   if (sndbuf < SOCK_MIN_SNDBUF)
     sndbuf = SOCK_MIN_SNDBUF;
@@ -684,7 +683,7 @@ static void netflow_export_flow_v5(const uint8_t proto, const uint32_t useraddr,
   spin_unlock_bh(&nfsend_lock);
 }
 
-struct nat_htable_ent *create_nat_session(const struct iphdr *ip, const uint16_t userport, const uint16_t destport, const uint32_t nataddr)
+static struct nat_htable_ent *create_nat_session(const struct iphdr *ip, const uint16_t userport, const uint16_t destport, const uint32_t nataddr)
 {
   const uint8_t proto = ip->protocol;
   const uint32_t useraddr = ip->saddr;
@@ -1506,7 +1505,7 @@ static unsigned int nat_tg(struct sk_buff *skb, const struct xt_action_param *pa
   return NF_ACCEPT;
 }
 
-void users_cleanup_timer_callback(struct timer_list *timer)
+static void users_cleanup_timer_callback( struct timer_list *timer )
 {
   struct user_htable_ent *user;
   struct hlist_head *head;
@@ -1563,7 +1562,7 @@ void users_cleanup_timer_callback(struct timer_list *timer)
   spin_unlock_bh(&users_timer_lock);
 }
 
-void sessions_cleanup_timer_callback(struct timer_list *timer)
+static void sessions_cleanup_timer_callback( struct timer_list *timer )
 {
   struct nat_htable_ent *session;
   struct hlist_head *head;
@@ -1643,7 +1642,7 @@ void sessions_cleanup_timer_callback(struct timer_list *timer)
   spin_unlock_bh(&sessions_timer_lock);
 }
 
-void nf_send_timer_callback(struct timer_list *timer)
+static void nf_send_timer_callback( struct timer_list *timer )
 {
   spin_lock_bh(&nfsend_lock);
   // printk(KERN_DEBUG "xt_NAT TIMER: Exporting netflow by timer\n");
@@ -1951,13 +1950,12 @@ static void __exit nat_tg_exit(void)
 {
   xt_unregister_target(&nat_tg_reg);
 
-  spin_lock_bh(&sessions_timer_lock);
-  spin_lock_bh(&users_timer_lock);
-  spin_lock_bh(&nfsend_lock);
-  del_timer(&sessions_cleanup_timer);
-  del_timer(&users_cleanup_timer);
-  if (!list_empty(&usock_list))
-    del_timer(&nf_send_timer);
+    spin_lock_bh(&sessions_timer_lock);
+    spin_lock_bh(&users_timer_lock);
+    spin_lock_bh(&nfsend_lock);
+    compat_del_timer_sync( &sessions_cleanup_timer );
+    compat_del_timer_sync( &users_cleanup_timer );
+    compat_del_timer_sync( &nf_send_timer );
 
   remove_proc_entry("sessions", proc_net_nat);
   remove_proc_entry("users", proc_net_nat);
