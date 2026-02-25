@@ -14,7 +14,22 @@
 #include <linux/udp.h>
 #include <linux/vmalloc.h>
 #include <linux/random.h>
+#include <linux/timekeeping.h>
 #include <net/tcp.h>
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,6,0)
+#define XT_NAT_PROC_OPS struct proc_ops
+#define XT_NAT_PROC_OPEN .proc_open
+#define XT_NAT_PROC_READ .proc_read
+#define XT_NAT_PROC_LSEEK .proc_lseek
+#define XT_NAT_PROC_RELEASE .proc_release
+#else
+#define XT_NAT_PROC_OPS struct file_operations
+#define XT_NAT_PROC_OPEN .open
+#define XT_NAT_PROC_READ .read
+#define XT_NAT_PROC_LSEEK .llseek
+#define XT_NAT_PROC_RELEASE .release
+#endif
 
 #define FLAG_REPLIED (1 << 0) /* 000001 */
 #define FLAG_TCP_FIN (1 << 1) /* 000010 */
@@ -152,22 +167,6 @@ static char *print_sockaddr(const struct sockaddr_storage *ss)
   snprintf(buf, sizeof(buf), "%pISpc", ss);
   return buf;
 }
-
-#if 0
-static inline long timer_end(struct timespec start_time)
-{
-  struct timespec end_time;
-  getrawmonotonic(&end_time);
-  return (end_time.tv_nsec - start_time.tv_nsec);
-}
-
-static inline struct timespec timer_start(void)
-{
-  struct timespec start_time;
-  getrawmonotonic(&start_time);
-  return start_time;
-}
-#endif
 
 static inline uint32_t get_pool_size(void)
 {
@@ -1505,13 +1504,15 @@ static unsigned int nat_tg(struct sk_buff *skb, const struct xt_action_param *pa
   return NF_ACCEPT;
 }
 
-static void users_cleanup_timer_callback( struct timer_list *timer )
+static void users_cleanup_timer_callback(struct timer_list *timer)
 {
-  struct user_htable_ent *user;
-  struct hlist_head *head;
-  struct hlist_node *next;
-  unsigned int i;
-  uint32_t vector_start, vector_end;
+    struct user_htable_ent *user;
+    struct hlist_head *head;
+    struct hlist_node *next;
+    unsigned int i;
+    u_int32_t vector_start, vector_end;
+
+    (void)timer;
 
   spin_lock_bh(&users_timer_lock);
 
@@ -1562,13 +1563,15 @@ static void users_cleanup_timer_callback( struct timer_list *timer )
   spin_unlock_bh(&users_timer_lock);
 }
 
-static void sessions_cleanup_timer_callback( struct timer_list *timer )
+static void sessions_cleanup_timer_callback(struct timer_list *timer)
 {
-  struct nat_htable_ent *session;
-  struct hlist_head *head;
-  struct hlist_node *next;
-  unsigned int i;
-  uint32_t vector_start, vector_end;
+    struct nat_htable_ent *session;
+    struct hlist_head *head;
+    struct hlist_node *next;
+    unsigned int i;
+    u_int32_t vector_start, vector_end;
+
+    (void)timer;
 
   spin_lock_bh(&sessions_timer_lock);
 
@@ -1642,13 +1645,14 @@ static void sessions_cleanup_timer_callback( struct timer_list *timer )
   spin_unlock_bh(&sessions_timer_lock);
 }
 
-static void nf_send_timer_callback( struct timer_list *timer )
+static void nf_send_timer_callback(struct timer_list *timer)
 {
-  spin_lock_bh(&nfsend_lock);
-  // printk(KERN_DEBUG "xt_NAT TIMER: Exporting netflow by timer\n");
-  netflow_export_pdu_v5();
-  mod_timer(&nf_send_timer, jiffies + msecs_to_jiffies(1000));
-  spin_unlock_bh(&nfsend_lock);
+  (void)timer;
+    spin_lock_bh(&nfsend_lock);
+    //printk(KERN_DEBUG "xt_NAT TIMER: Exporting netflow by timer\n");
+    netflow_export_pdu_v5();
+    mod_timer( &nf_send_timer, jiffies + msecs_to_jiffies(1000) );
+    spin_unlock_bh(&nfsend_lock);
 }
 
 static int nat_seq_show(struct seq_file *m, void *v)
@@ -1695,24 +1699,12 @@ static int nat_seq_open(struct inode *inode, struct file *file)
 {
   return single_open(file, nat_seq_show, NULL);
 }
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
-static const struct proc_ops nat_seq_ops =
-{
-  .proc_open = nat_seq_open,
-  .proc_read = seq_read,
-  .proc_lseek = seq_lseek,
-  .proc_release = single_release,
+static const XT_NAT_PROC_OPS nat_seq_ops = {
+    XT_NAT_PROC_OPEN		= nat_seq_open,
+    XT_NAT_PROC_READ		= seq_read,
+    XT_NAT_PROC_LSEEK		= seq_lseek,
+    XT_NAT_PROC_RELEASE	= single_release,
 };
-#else
-static const struct file_operations nat_seq_ops =
-{
-  .open = nat_seq_open,
-  .read = seq_read,
-  .llseek = seq_lseek,
-  .release = single_release,
-};
-#endif
 
 static int users_seq_show(struct seq_file *m, void *v)
 {
@@ -1751,24 +1743,12 @@ static int users_seq_open(struct inode *inode, struct file *file)
 {
   return single_open(file, users_seq_show, NULL);
 }
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
-static const struct proc_ops users_seq_ops =
-{
-  .proc_open = users_seq_open,
-  .proc_read = seq_read,
-  .proc_lseek = seq_lseek,
-  .proc_release = single_release,
+static const XT_NAT_PROC_OPS users_seq_ops = {
+    XT_NAT_PROC_OPEN           = users_seq_open,
+    XT_NAT_PROC_READ           = seq_read,
+    XT_NAT_PROC_LSEEK          = seq_lseek,
+    XT_NAT_PROC_RELEASE        = single_release,
 };
-#else
-static const struct file_operations users_seq_ops =
-{
-  .open = users_seq_open,
-  .read = seq_read,
-  .llseek = seq_lseek,
-  .release = single_release,
-};
-#endif
 
 static int stat_seq_show(struct seq_file *m, void *v)
 {
@@ -1783,26 +1763,16 @@ static int stat_seq_show(struct seq_file *m, void *v)
 
   return 0;
 }
-
-static int stat_seq_open(struct inode *inode, struct file *file) { return single_open(file, stat_seq_show, NULL); }
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
-static const struct proc_ops stat_seq_ops =
+static int stat_seq_open(struct inode *inode, struct file *file)
 {
-  .proc_open = stat_seq_open,
-  .proc_read = seq_read,
-  .proc_lseek = seq_lseek,
-  .proc_release = single_release,
+    return single_open(file, stat_seq_show, NULL);
+}
+static const XT_NAT_PROC_OPS stat_seq_ops = {
+    XT_NAT_PROC_OPEN           = stat_seq_open,
+    XT_NAT_PROC_READ           = seq_read,
+    XT_NAT_PROC_LSEEK          = seq_lseek,
+    XT_NAT_PROC_RELEASE        = single_release,
 };
-#else
-static const struct file_operations stat_seq_ops =
-{
-  .open = stat_seq_open,
-  .read = seq_read,
-  .llseek = seq_lseek,
-  .release = single_release,
-};
-#endif
 
 #define SEPARATORS " ,;\t\n"
 static int add_nf_destinations(const char *ptr)
